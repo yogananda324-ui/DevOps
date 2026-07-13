@@ -1,0 +1,103 @@
+name: Create EC2 Instance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  create-ec2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Set variables
+        run: |
+          # Region and AMI you provided
+          echo "AWS_REGION=ap-south-1" >> $GITHUB_ENV
+          echo "AMI_ID=ami-02b1e663aa8e2a28a" >> $GITHUB_ENV
+
+          # Choose instance type
+          echo "INSTANCE_TYPE=t3.micro" >> $GITHUB_ENV
+
+          # Key pair name created by workflow (unique per run)
+          echo "KEY_NAME=gha-key-${{ github.run_id }}" >> $GITHUB_ENV
+
+          # Use one of your subnets (you provided these)
+          echo "SUBNET_ID=subnet-09e9a032f89fb3113" >> $GITHUB_ENV
+
+          # Use your existing security group ID (default SG you listed)
+          echo "SEC_GROUP_ID=sg-0a0819fe6fae1ec13" >> $GITHUB_ENV
+
+          # Replace this with your public IP/CIDR before running for secure SSH access
+          echo "SSH_CIDR=REPLACE_WITH_YOUR_IP/32" >> $GITHUB_ENV
+
+          echo "TAG_NAME=gha-ec2-${{ github.run_id }}" >> $GITHUB_ENV
+
+      - name: Create key pair and save private key
+        id: keypair
+        run: |
+          aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > key.pem
+          chmod 600 key.pem
+          echo "KEY_FILE=key.pem" >> $GITHUB_ENV
+        shell: bash
+
+      - name: (Optional) Authorize SSH on existing security group
+        if: env.SSH_CIDR != 'REPLACE_WITH_YOUR_IP/32'
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$SEC_GROUP_ID" \
+            --protocol tcp --port 22 --cidr "$SSH_CIDR" || echo "Ingress rule may already exist"
+          echo "Authorized SSH from $SSH_CIDR on $SEC_GROUP_ID"
+        shell: bash
+
+      - name: Launch EC2 instance
+        id: launch
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type "$INSTANCE_TYPE" \
+            --key-name "$KEY_NAME" \
+            --subnet-id "$SUBNET_ID" \
+            --security-group-ids "$SEC_GROUP_ID" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$TAG_NAME}]" \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "Launched instance $INSTANCE_ID"
+        shell: bash
+
+      - name: Wait for instance to be running
+        run: |
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+          echo "Instance is running"
+        shell: bash
+
+      - name: Get public IP
+        run: |
+          PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "Instance public IP: $PUBLIC_IP"
+        shell: bash
+
+      - name: Upload private key as artifact for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: gha-key-${{ github.run_id }}
+          path: key.pem
+
+      - name: Output connection info
+        run: |
+          echo "SSH command: ssh -i key.pem ec2-user@$PUBLIC_IP"
+          echo "Instance ID: $INSTANCE_ID"
+
