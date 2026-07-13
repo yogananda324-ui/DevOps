@@ -8,6 +8,9 @@ on:
 jobs:
   create-ec2:
     runs-on: ubuntu-latest
+    concurrency:
+      group: create-ec2-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v6
